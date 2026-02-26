@@ -1,16 +1,26 @@
+# ============================================================
+# Sensor Dashboard — Flask server
+# Prima podatke sa RPi, čuva u PostgreSQL bazi,
+# i prikazuje ih na web stranici.
+# ============================================================
+
 from flask import Flask, request, jsonify, render_template_string
 import psycopg2
 import psycopg2.extras
 import os
 
 app = Flask(__name__)
+
+# URL baze se čita iz environment varijable (postavlja se na Render-u)
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 def get_db():
+    """Otvara konekciju ka PostgreSQL bazi."""
     conn = psycopg2.connect(DATABASE_URL)
     return conn
 
 def init_db():
+    """Kreira tabelu ako već ne postoji. Pokreće se pri startu aplikacije."""
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -28,8 +38,12 @@ def init_db():
             """)
         conn.commit()
 
+# Inicijalizuj bazu pri pokretanju
 init_db()
 
+# ============================================================
+# HTML šablon za dashboard stranicu
+# ============================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -100,22 +114,22 @@ HTML_TEMPLATE = """
     <div class="stat-card">
       <div class="stat-label">Value {{ i }}</div>
       <div class="stat-value">{{ latest['value' ~ i] if latest['value' ~ i] is not none else '—' }}</div>
-      <div class="stat-sub">latest reading</div>
+      <div class="stat-sub">poslednje očitavanje</div>
     </div>
     {% endfor %}
     <div class="stat-card">
-      <div class="stat-label">Total Readings</div>
+      <div class="stat-label">Ukupno očitavanja</div>
       <div class="stat-value">{{ total }}</div>
       <div class="stat-sub">{{ latest.date }} {{ latest.time }}</div>
     </div>
   </div>
   {% endif %}
-  <div class="section-title">Recent Readings</div>
-  <button class="refresh-btn" onclick="location.reload()">↻ REFRESH</button>
+  <div class="section-title">Poslednja očitavanja</div>
+  <button class="refresh-btn" onclick="location.reload()">↻ OSVJEŽI</button>
   <div class="table-wrap">
     {% if rows %}
     <table>
-      <thead><tr><th>#</th><th>V1</th><th>V2</th><th>V3</th><th>V4</th><th>V5</th><th>Date</th><th>Time</th></tr></thead>
+      <thead><tr><th>#</th><th>V1</th><th>V2</th><th>V3</th><th>V4</th><th>V5</th><th>Datum</th><th>Vreme</th></tr></thead>
       <tbody>
         {% for row in rows %}
         <tr>
@@ -132,38 +146,56 @@ HTML_TEMPLATE = """
       </tbody>
     </table>
     {% else %}
-    <div class="empty">No data yet. Waiting for sensor readings...</div>
+    <div class="empty">Nema podataka. Čeka se na očitavanja sa senzora...</div>
     {% endif %}
   </div>
   <div class="api-box">
-    <div class="section-title" style="margin-bottom:12px">RPi Integration</div>
-    Send data from your Raspberry Pi:
-    <code>curl -X POST https://YOUR-APP.onrender.com/data \
+    <div class="section-title" style="margin-bottom:12px">Slanje podataka sa RPi</div>
+    Pošalji podatke sa Raspberry Pi koristeći curl:
+    <code>curl -X POST https://TVOJ-APP.onrender.com/data \
   -H "Content-Type: application/json" \
-  -d '{"value1": 23.5, "value2": 60.1, "value3": 1013.2, "value4": 0.5, "value5": 99.9, "date": "2024-01-15", "time": "14:30:00"}'</code>
+  -d '{"value1": 23.5, "value2": 60.1, "value3": 1013.2, "value4": 0.5, "value5": 99.9, "date": "2026-02-26", "time": "19:10:00"}'</code>
   </div>
 </div>
+<!-- Automatsko osvežavanje svakih 30 sekundi -->
 <script>setTimeout(() => location.reload(), 30000);</script>
 </body>
 </html>
 """
 
+# ============================================================
+# Rute (URL endpoint-i)
+# ============================================================
+
 @app.route("/")
 def dashboard():
+    """Prikazuje glavni dashboard sa tabelom očitavanja."""
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # Uzmi poslednjih 100 očitavanja, sortirano od najnovijeg
             cur.execute("SELECT * FROM readings ORDER BY id DESC LIMIT 100")
             rows = cur.fetchall()
+            # Ukupan broj očitavanja u bazi
             cur.execute("SELECT COUNT(*) as cnt FROM readings")
             total = cur.fetchone()["cnt"]
     latest = rows[0] if rows else None
     return render_template_string(HTML_TEMPLATE, rows=rows, latest=latest, total=total)
 
+
 @app.route("/data", methods=["POST"])
 def receive_data():
+    """
+    Prima JSON podatke sa RPi i čuva ih u bazi.
+    Očekivani format:
+    {
+        "value1": 23.5, "value2": 60.1, "value3": 1013.2,
+        "value4": 0.5, "value5": 99.9,
+        "date": "2026-02-26", "time": "19:10:00"
+    }
+    """
     d = request.get_json(force=True)
     if not d:
-        return jsonify({"error": "No JSON body"}), 400
+        return jsonify({"error": "Nema JSON tela u zahtevu"}), 400
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
@@ -178,10 +210,13 @@ def receive_data():
             conn.commit()
         return jsonify({"ok": True}), 201
     except Exception as e:
+        # Vrati grešku ako nešto pođe po zlu
         return jsonify({"error": str(e)}), 500
+
 
 @app.route("/api/readings")
 def api_readings():
+    """Vraća očitavanja kao JSON — korisno za integraciju sa drugim alatima."""
     limit = min(int(request.args.get("limit", 100)), 1000)
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -189,6 +224,8 @@ def api_readings():
             rows = cur.fetchall()
     return jsonify([dict(r) for r in rows])
 
+
+# Pokretanje lokalnog servera (samo za testiranje, ne za produkciju)
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
